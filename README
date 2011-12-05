@@ -1,2 +1,42 @@
 an example consumer for the utorrent share project, see
 http://www.utorrent.com/labs/share
+
+requirements:
+
+python2.6
+
+Tornado Web
+https://github.com/facebook/tornado
+
+BitTorrent/uTorrent web api
+https://github.com/kzahel/btapi
+
+Kyletorrent
+https://github.com/kzahel/ktorrent
+
+
+build instructions:
+
+make a file config_prod.py alongside run.py
+utserver_username='{{ the username thing }}'
+utserver_password='{{ the password }}'
+
+1) setup your virtual environment
+virtualenv -p python2.6 _env
+
+2) download or clone the requirements
+git clone ... etc
+
+3) make symlinks inside your virtual environment
+cd _env/install/lib/python2.6
+ln -sf /path/to/requirement/tornado/tornado .
+ln -sf /path/to/requirement/btapi/btapi .
+
+4) install ktorrent somewhere
+edit the options in ktorrent/serve.py (the paths that show /home/kyle should be changed)
+
+5) run the test
+_env/bin/python -m sharetest.run --datapath={{ (should match the one you edited in ktorrent) }} --ktorrent_path={{ location you installed ktorrent }}
+
+
+sorry it's a pretty do-it-yourself build setup :-(
