@@ -8,14 +8,36 @@ import logging
 import Cookie
 import os
 import datetime
+import time
 import subprocess
 import random
 import math
 from hashlib import sha1
 import bencode
 import tornado.ioloop
+import json
 import functools
-ioloop = tornado.ioloop.IOLoop.instance()
+import sys
+import btapi.btapi
+
+def create_torrent_and_post_args(to_userid):
+    to = [ 
+        {'type':'user', 'id':to_userid}
+        ]
+    hash, filepath = create_random_torrent()
+
+    tor_obj = { 'type': 'torrent',
+                'hash': hash,
+                'name': 'foobar',
+                'seed': True,
+                'magnet': 'magnet:?xt=urn:btih:%s' % hash,
+                'size': 1000,
+                }
+
+    data = {'body':'test torrent post',
+            'to':to,
+            'object':tor_obj}
+    return data, filepath
 
 hexchars = map(str,range(10)) + list('abcdef')
 def randomhash():
@@ -43,18 +65,26 @@ httpclient = tornado.httpclient.AsyncHTTPClient()
 
 
 def seed_torrent(torrentpath, hostport):
+    args = ['/usr/bin/python','-m','ktorrent.serve','--startup_connect_to=%s' % hostport,'--startup_connect_torrent="%s"' % torrentpath]
     logging.info('calling seed torrent!')
-    s = subprocess.Popen(['/usr/bin/python','-m','ktorrent.serve','--startup_connect_to=%s' % hostport,'--startup_connect_torrent=%s' % torrentpath], cwd=options.ktorrent_path)
+    logging.info('run in %s' % options.ktorrent_path)
+    logging.info(' '.join(args))
+
+    sys.exit(0)
+    s = subprocess.Popen(args, cwd=options.ktorrent_path)
     #output = s.wait()
     #pdb.set_trace()
 
-def create_random_torrent():
+def create_random_torrent(size=None):
+    if size == None:
+        size = 100000
+
     datestr = str(datetime.datetime.now())
     torrentdatadir = os.path.join( options.datapath, datestr )
     os.mkdir( torrentdatadir )
     fo = open( os.path.join(torrentdatadir, 'testdata.txt'), 'w' )
-    for _ in range(1000):
-        fo.write( str(math.pi) + '\n' )
+    for _ in range(size):
+        fo.write( str(math.pi) + '\r\n' )
     fo.close()
     torrentfilepath = os.path.join( options.datapath, datestr + '.torrent')
     s = subprocess.Popen(['/usr/bin/createtorrent','-a','http://10.10.90.24:6688',
@@ -74,12 +104,12 @@ class Group(object):
     
     @gen.engine
     def get_meta(self, callback=None):
-        result = yield gen.Task( httpclient.fetch, makereq('/posts/%s' % self.data['id'], user=self.user) )
+        result = yield gen.Task( httpclient.fetch, makereq('/groups/%s' % self.data['id'], user=self.user) )
         callback(result)
 
     @gen.engine
     def get_comments(self, callback=None):
-        result = yield gen.Task( httpclient.fetch, makereq('/posts/%s/comments' % self.data['id'], user=self.user) )
+        result = yield gen.Task( httpclient.fetch, makereq('/groups/%s/comments' % self.data['id'], user=self.user) )
         callback(result)
 
     @gen.engine
@@ -130,12 +160,23 @@ class Post(object):
         self.data = data
         self._when_callback = None
 
-    def poll_until_seeded_on(self, when_callback):
-        """ keeps polling until seeded on attribute is set """
+    @gen.engine
+    def get_meta(self, user, callback=None):
+        response = yield gen.Task( httpclient.fetch, makereq('/posts/%s' % self.data['id'], user=user) )
+        if response.code == 200:
+            self.data = json.loads(response.body)
+            callback(self.data)
+        else:
+            callback(None)
 
-        self._when_callback = when_callback
+    @gen.engine
+    def get_comments(self, user, callback=None):
+        result = yield gen.Task( httpclient.fetch, makereq('/posts/%s/comments' % self.data['id'], user=user) )
+        callback(result)
 
-
+    def seeded(self):
+        if 'object' in self.data and 'seeded_on' in self.data['object']:
+            return self.data['object']['seeded_on']
     
 
 class User(object):
@@ -156,6 +197,7 @@ class User(object):
         if response.code == 200:
             callback( User(name, password) )
         else:
+            logging.error('error creating user %s' % response)
             callback( None )
 
 
@@ -175,6 +217,7 @@ class User(object):
                                                   password = self.password ) ),
                          callback = (yield gen.Callback(k)))
         response = yield gen.Wait(k)
+        logging.info('login resp %s' % response)
         if response.code == 200 and 'Set-Cookie' in response.headers:
             self.data = json.loads(response.body)
             self.authcookie = Cookie.BaseCookie(response.headers['Set-Cookie'])['_auth'].value
@@ -222,28 +265,97 @@ class User(object):
         if not response.error:
             callback( json.loads(response.body) )
         else:
+            logging.error('create post error %s' % response)
             callback( False )
 
 import time
 
-USERNAME='kyle+329832983298@bittorrent.com'
+USERNAME='kyle+232@bittorrent.com'
 PASS='pass'
 
+ioloop = tornado.ioloop.IOLoop.instance()
+
+def asyncsleep(t, callback=None):
+    logging.info('sleeping %s' % t)
+    ioloop.add_timeout( time.time() + t, callback )
+
+
 @gen.engine
-def dotest():
-    user = User(USERNAME, PASS)
+def do_login(username, password, callback=None):
+    user = User(username, password)
     result = yield gen.Task(user.login)
 
     logging.info('logged in with result %s' % result)
 
     if user.authcookie is None:
         logging.warn('error loggin in, creatin user')
-        result = yield gen.Task( User.create, USERNAME, PASS )
-        logging.info('created user with result %s' % result)
+        result = yield gen.Task( User.create, username, password )
+        yield gen.Task( asyncsleep, 1 )
         result = yield gen.Task(user.login)
         if not user.authcookie:
             logging.error('still couldnt login')
-            return
+            callback(None)
+        callback(user)
+    else:
+        callback(user)
+
+@gen.engine
+def test_seeded_on():
+    user = yield gen.Task( do_login, USERNAME, PASS )
+    assert user
+    
+    user2 = yield gen.Task( do_login, 'kyle+RECIPTEST@bittorrent.com', 'baloeuthao' )
+    assert user2
+
+    args, torrentpath = create_torrent_and_post_args(user2.data['id'])
+    result = yield gen.Task( user.create_post, args )
+    logging.info('created torrent with result %s' % result)
+    post = Post(result)
+    count = 0
+    seeded = False
+
+    t = time.time()
+
+    while time.time() - t < 10:
+        yield gen.Task( post.get_meta, user )
+        seeded = post.seeded()
+        if seeded:
+            logging.info('post is seeded! -- on %s' % seeded)
+            break
+        count += 1
+
+    assert seeded
+
+    host,port = seeded[0].split(':')
+    port = int(port)
+
+    server = btapi.btapi.BTServer(host,options.utserver_webui_port, options.utserver_username, options.utserver_password)
+
+    logging.info('checking %s on server %s' % (args['object']['hash'].lower(), host))
+    result = yield gen.Task( server.get, '/gui/?list=1' )
+    logging.info('list result %s' % result)
+
+    hashes = [d[0].lower() for d in result.data['torrents']]
+    assert args['object']['hash'].lower() in hashes
+
+    seed_torrent(torrentpath, seeded[0])
+
+@gen.engine
+def check_has_torrent(ip=None, hash=None, port=None):
+    server = btapi.btapi.BTServer(ip,port,options.utserver_username, options.utserver_password)
+    result = yield gen.Task( server.get, '/gui/?list=1' )
+    logging.info('list result %s' % result)
+    hashes = [d[0].lower() for d in result.data['torrents']]
+    
+    found = hash in hashes
+    assert found
+    logging.info('found torrent %s on %s' % (hash, ip))
+
+    
+
+@gen.engine
+def dotest():
+    user = yield gen.Task( do_login, USERNAME, PASS )
 
     result = yield gen.Task(user.get_groups)
     if len(user.groups) > 0:
@@ -260,6 +372,7 @@ def dotest():
             return
         
     posts = yield gen.Task( user.get_posts )
+
     if posts is False:
         logging.error('error fetching posts')
     if len(posts) == 0:
@@ -267,7 +380,7 @@ def dotest():
         torrent = yield gen.Task( group.post_torrent )
     else:
         logging.info('had some posts in this group already')
-        #torrent = yield gen.Task( group.post_torrent )
+        torrent = yield gen.Task( group.post_torrent )
 
         random_email = 'kyle+%s@bittorrent.com' % str(int( 10000 * random.random() ))
         # create a random user
