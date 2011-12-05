@@ -12,6 +12,7 @@ import time
 import subprocess
 import random
 import math
+import shutil
 from hashlib import sha1
 import bencode
 import tornado.ioloop
@@ -24,20 +25,20 @@ def create_torrent_and_post_args(to_userid):
     to = [ 
         {'type':'user', 'id':to_userid}
         ]
-    hash, filepath = create_random_torrent()
+    torrent = Torrent.create_random()
 
     tor_obj = { 'type': 'torrent',
-                'hash': hash,
+                'hash': torrent.hash,
                 'name': 'foobar',
                 'seed': True,
-                'magnet': 'magnet:?xt=urn:btih:%s' % hash,
+                'magnet': 'magnet:?xt=urn:btih:%s' % torrent.hash,
                 'size': 1000,
                 }
 
     data = {'body':'test torrent post',
             'to':to,
             'object':tor_obj}
-    return data, filepath
+    return data, torrent
 
 hexchars = map(str,range(10)) + list('abcdef')
 def randomhash():
@@ -64,38 +65,71 @@ def doreq(url, **kwargs):
 httpclient = tornado.httpclient.AsyncHTTPClient()
 
 
-def seed_torrent(torrentpath, hostport):
-    args = ['/usr/bin/python','-m','ktorrent.serve','--startup_connect_to=%s' % hostport,'--startup_connect_torrent="%s"' % torrentpath]
+def seed_torrent(torrent, hostport):
+    torrentpath = torrent.filepath
+    args = ['/usr/bin/python','-m','ktorrent.serve','--startup_connect_to=%s' % hostport,'--startup_connect_torrent=%s' % torrentpath,'--startup_exit_on_close=1']
     logging.info('calling seed torrent!')
     logging.info('run in %s' % options.ktorrent_path)
     logging.info(' '.join(args))
 
-    sys.exit(0)
+    #sys.exit(0)
     s = subprocess.Popen(args, cwd=options.ktorrent_path)
-    #output = s.wait()
-    #pdb.set_trace()
+    output = s.wait()
+    logging.info('subprocess exit with %s' % output)
+    success = (output == 0)
+    if success:
+        shutil.rmtree(torrent.datapath)
+        download_torrent(torrent, hostport)
+    else:
+        logging.error('error uploading torrent!')
+        sys.exit(1)
 
-def create_random_torrent(size=None):
-    if size == None:
-        size = 100000
 
-    datestr = str(datetime.datetime.now())
-    torrentdatadir = os.path.join( options.datapath, datestr )
-    os.mkdir( torrentdatadir )
-    fo = open( os.path.join(torrentdatadir, 'testdata.txt'), 'w' )
-    for _ in range(size):
-        fo.write( str(math.pi) + '\r\n' )
-    fo.close()
-    torrentfilepath = os.path.join( options.datapath, datestr + '.torrent')
-    s = subprocess.Popen(['/usr/bin/createtorrent','-a','http://10.10.90.24:6688',
-                          torrentdatadir,
-                          torrentfilepath])
-    s.wait()
-    fo = open( torrentfilepath )
-    infohash = sha1( bencode.bencode( bencode.bdecode( fo.read() )['info'] ) ).hexdigest()
-    fo.close()
-    return infohash, torrentfilepath
+def download_torrent(torrent, hostport):
+    args = ['/usr/bin/python','-m','ktorrent.serve','--startup_connect_to=%s' % hostport,'--startup_connect_to_hash=%s' % torrent.hash,'--startup_exit_on_close=1']
+    logging.info('calling download torrent!')
+    logging.info('run in %s' % options.ktorrent_path)
+    logging.info(' '.join(args))
+
+    s = subprocess.Popen(args, cwd=options.ktorrent_path)
+    output = s.wait()
+    success = (output == 0)
+    if success:
+        logging.info('downloaded whole torrent! yay')
+        sys.exit(0)
+    else:
+        logging.error('did not download whole torrent! :-( noooOOOO')
+        sys.exit(1)
+
     
+class Torrent(object):
+    @classmethod
+    def create_random(cls, size=None):
+        if size == None:
+            size = 100000
+
+        datestr = str(datetime.datetime.now())
+        torrentdatadir = os.path.join( options.datapath, datestr )
+        os.mkdir( torrentdatadir )
+        fo = open( os.path.join(torrentdatadir, 'testdata.txt'), 'w' )
+        for _ in range(size):
+            fo.write( str(math.pi) + '\r\n' )
+        fo.close()
+        torrentfilepath = os.path.join( options.datapath, datestr + '.torrent')
+        s = subprocess.Popen(['/usr/bin/createtorrent','-a','http://10.10.90.24:6688',
+                              torrentdatadir,
+                              torrentfilepath])
+        s.wait()
+        torrent = Torrent(torrentfilepath)
+        return torrent
+
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.datapath = self.filepath[:-len('.torrent')]
+        fo = open( self.filepath )
+        self.hash = sha1( bencode.bencode( bencode.bdecode( fo.read() )['info'] ) ).hexdigest()
+        fo.close()
+
 
 class Group(object):
     def __init__(self, data, user=None):
@@ -123,12 +157,12 @@ class Group(object):
     @gen.engine
     def post_torrent(self, callback=None):
         logging.info('creatin a random torrent')
-        hash, filepath = create_random_torrent()
+        torrent = Torrent.create_random()
         logging.info('postin a torrent!')
         groupid = self.data['id']
-        #hash = randomhash()
+
         tor_obj = { 'type': 'torrent',
-                    'hash': hash,
+                    'hash': torrent.hash,
                     'name': 'foobar',
                     'seed': True,
                     'magnet': 'magnet:?xt=urn:btih:%s' % hash,
@@ -151,7 +185,7 @@ class Group(object):
         # listen for updates ...
 
         hostport = '192.168.56.1:8889'
-        #ioloop.add_timeout( time.time() + 5, functools.partial(seed_torrent, filepath, hostport) )
+
 
 
 class Post(object):
@@ -307,7 +341,7 @@ def test_seeded_on():
     user2 = yield gen.Task( do_login, 'kyle+RECIPTEST@bittorrent.com', 'baloeuthao' )
     assert user2
 
-    args, torrentpath = create_torrent_and_post_args(user2.data['id'])
+    args, torrent = create_torrent_and_post_args(user2.data['id'])
     result = yield gen.Task( user.create_post, args )
     logging.info('created torrent with result %s' % result)
     post = Post(result)
@@ -335,10 +369,24 @@ def test_seeded_on():
     result = yield gen.Task( server.get, '/gui/?list=1' )
     logging.info('list result %s' % result)
 
+    settings = yield gen.Task( server.get, '/gui/?action=getsettings' )
+    d = {}
+    for item in settings.data['settings']:
+        key, default, cur, access = item
+        d[key] = [cur, default]
+
+    relevant = ['conns_globally', 'conns_per_torrent', 'max_active_downloads', 'max_active_torrent', 'net.max_halfopen', 'seed_ratio','ul_slots_per_torrent']
+
+    #for k in sorted(d.keys()):
+    #    logging.info('%s: %s' % (k,d[k]))
+
+    for k in sorted(relevant):
+        logging.info('%s: %s' % (k,d[k]))
+
     hashes = [d[0].lower() for d in result.data['torrents']]
     assert args['object']['hash'].lower() in hashes
 
-    seed_torrent(torrentpath, seeded[0])
+    seed_torrent(torrent, seeded[0])
 
 @gen.engine
 def check_has_torrent(ip=None, hash=None, port=None):
